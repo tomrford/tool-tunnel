@@ -1,0 +1,5 @@
+[repos.dumbpipe]
+url = "https://github.com/n0-computer/dumbpipe.git"
+mode = "ref"
+ref = "main"
+commit = "ffa3d1f322bcaba4ec063289cd21e341eed93bab"
