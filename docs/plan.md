@@ -1,28 +1,35 @@
 # Plan
 
-`tool-tunnel` provides private remote MCP access without a hosted account system. The local process remains a normal stdio MCP server from the client point of view. Remote machines run exporters that expose real stdio MCP servers over trusted iroh byte pipes.
+`tool-tunnel` provides private remote MCP access without a hosted account system. The local process remains a normal stdio MCP server from the outer client point of view. Remote machines run exporters that expose one managed child stdio MCP session over trusted iroh MCP sessions.
 
-The first prototype has two roles.
+The runtime has two roles.
 
-`tool-tunnel remote` runs beside a real MCP server. It owns a persistent iroh secret key, starts an iroh endpoint, prints or writes a shareable ticket containing its endpoint ID plus relay or direct-address hints, and accepts one application ALPN: `tool-tunnel/stdio/0`. It launches or connects to the configured stdio MCP server and forwards bytes between the iroh stream and the child stdin/stdout. The exporter does not parse MCP messages.
+`tool-tunnel export <profile>` runs beside a real MCP server. It owns a persistent iroh secret key, starts an iroh endpoint, prints a shareable ticket containing its endpoint ID and reachability hints, and accepts one application ALPN: `tool-tunnel/stdio/0`. It launches the configured child stdio MCP server once, initializes it once, caches `tools/list`, serves that catalog to allowlisted local adapters, and forwards `tools/call` into the shared child session. Calls are serialized by default.
 
-`tool-tunnel local` is configured in Claude, Cursor, or another MCP client as a stdio server. It owns its own persistent iroh key, reads trusted remote tickets from a local config file, dials each exporter, starts one MCP client session over each reachable iroh stdio tunnel, requests tool metadata, prefixes names to avoid collisions, and forwards tool calls to the matching remote session.
+`tool-tunnel client <profile>` is configured in Claude, Cursor, Codex, or another MCP client as a stdio server. It owns its own persistent iroh key, reads trusted import tickets from config, verifies endpoint ID pins, dials each exporter, starts one MCP client session over each reachable iroh stream, requests tool metadata, prefixes names to avoid collisions, and forwards tool calls to the matching remote session.
 
-Peer trust is explicit. Endpoint IDs are treated like SSH public keys. Exporters allow only configured local endpoint IDs. The local side trusts only configured exporter endpoint IDs. There is no global search, account login, or public index in the first version.
+Peer trust is explicit. Endpoint IDs are treated like SSH public keys. Exporters allow only configured local endpoint IDs. The local side trusts only configured exporter endpoint IDs. There is no global search, account login, public index, temp identity, or open export mode.
 
-Initial user flow:
+Config is human-editable JSON plus tool-owned identity files under the config directory:
 
-1. Start `tool-tunnel remote -- <stdio command>`.
-2. Copy the printed ticket to the local machine.
-3. Add the ticket to `tool-tunnel local` config.
-4. Configure the MCP client to launch `tool-tunnel local`.
-5. The client sees remote tools as local MCP tools.
+```text
+~/.config/tool-tunnel/
+  config.json
+  identities/
+    clients/default
+    exports/mini-tools
+```
 
-The first code slice should prove one happy path: one local aggregator, one exporter, one wrapped stdio MCP server, one list-tools request, one tool-call request, and rejection of an untrusted peer.
+User flow:
 
-Open decisions:
+1. Run `tool-tunnel identity init client default` and share `tool-tunnel identity show client default` with the export machine.
+2. Run `tool-tunnel identity init export mini-tools` on the export machine.
+3. Configure the export profile command, args, cwd, env, and `allowClients`.
+4. Run `tool-tunnel export mini-tools`, then copy its ticket and endpoint ID into the client profile imports.
+5. Configure the outer MCP app to launch `tool-tunnel client default`.
 
-- Ticket encoding: use `iroh_tickets::endpoint::EndpointTicket` first, with an optional config wrapper once local aliases and trust policy need a portable bundle.
-- MCP protocol handling: use `rmcp` for the local outward server and local inward client sessions if its client/server APIs fit the aggregation shape.
-- Stream model: one long-lived bidirectional stdio tunnel per connected remote MCP server. Fresh streams require fresh MCP initialization and are not part of the first version.
-- Config path: repo-local examples first; XDG config once the CLI contract exists.
+Open implementation work:
+
+- Restart and cache-refresh behavior for child MCP process failure or tool-list changes.
+- Cancellation propagation from local callers into the shared child session.
+- Per-tool or per-server concurrency policy after real tool safety is known.

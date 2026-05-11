@@ -1,6 +1,6 @@
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -12,6 +12,9 @@ use rmcp::{
 };
 
 use crate::{ClientArgs, config::Config, iroh_link};
+
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Aggregator {
     remotes: Arc<HashMap<String, RemoteSession>>,
@@ -39,7 +42,14 @@ pub async fn run(args: ClientArgs) -> Result<()> {
     let mut published_tools = Vec::new();
 
     for (alias, import_config) in client_config.imports {
-        match connect_remote(&endpoint, &alias, &import_config.ticket).await {
+        match connect_remote(
+            &endpoint,
+            &alias,
+            &import_config.ticket,
+            &import_config.endpoint_id,
+        )
+        .await
+        {
             Ok((session, tools)) => {
                 for tool in tools {
                     published_tools.push(prefix_tool(&alias, tool));
@@ -73,25 +83,40 @@ async fn connect_remote(
     endpoint: &iroh::Endpoint,
     alias: &str,
     ticket: &str,
+    endpoint_id: &str,
 ) -> Result<(RemoteSession, Vec<Tool>)> {
     let ticket = iroh_link::parse_ticket(ticket)?;
     let addr = ticket.endpoint_addr();
-    let connection = endpoint
-        .connect(addr.clone(), iroh_link::ALPN)
-        .await
-        .with_context(|| format!("connect to remote {alias:?}"))?;
+    let ticket_endpoint_id = addr.id.to_string();
+    if ticket_endpoint_id != endpoint_id {
+        bail!(
+            "import {alias:?} endpointId {endpoint_id:?} does not match ticket endpoint {ticket_endpoint_id:?}"
+        );
+    }
+    let connection = tokio::time::timeout(
+        REMOTE_CONNECT_TIMEOUT,
+        endpoint.connect(addr.clone(), iroh_link::ALPN),
+    )
+    .await
+    .with_context(|| format!("remote {alias:?} iroh connect timed out"))?
+    .with_context(|| format!("connect to remote {alias:?}"))?;
     let (mut send, recv) = connection.open_bi().await.context("open iroh stream")?;
     send.write_all(iroh_link::HANDSHAKE)
         .await
         .context("write tunnel handshake")?;
 
-    let client = ().serve((recv, send)).await.context("initialize remote MCP session")?;
-    let tools = client
-        .peer()
-        .list_tools(Default::default())
+    let client = tokio::time::timeout(REMOTE_CONNECT_TIMEOUT, ().serve((recv, send)))
         .await
-        .context("list remote tools")?
-        .tools;
+        .with_context(|| format!("remote {alias:?} MCP initialize timed out"))?
+        .context("initialize remote MCP session")?;
+    let tools = tokio::time::timeout(
+        REMOTE_LIST_TOOLS_TIMEOUT,
+        client.peer().list_tools(Default::default()),
+    )
+    .await
+    .with_context(|| format!("remote {alias:?} tools/list timed out"))?
+    .context("list remote tools")?
+    .tools;
 
     let peer = client.peer().clone();
     Ok((
