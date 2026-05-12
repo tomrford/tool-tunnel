@@ -9,7 +9,7 @@ use std::{io::Write, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use config::{IdentityRole, config_base_dir, identity_path};
+use config::{IdentityRole, config_base_dir, identity_path, validate_alias};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
 fn run_identity(args: IdentityArgs) -> Result<()> {
     match args.command {
         IdentityCommand::Init(args) => {
-            let path = identity_arg_path(&args);
+            let path = identity_arg_path(&args)?;
             iroh_link::init_identity(&path)?;
             eprintln!(
                 "created {} identity {:?} at {}",
@@ -125,7 +125,7 @@ fn run_identity(args: IdentityArgs) -> Result<()> {
             Ok(())
         }
         IdentityCommand::Show(args) => {
-            let path = identity_arg_path(&args);
+            let path = identity_arg_path(&args)?;
             let public = iroh_link::public_key_from_file(&path)?;
             writeln!(std::io::stdout(), "{public}")?;
             Ok(())
@@ -133,17 +133,14 @@ fn run_identity(args: IdentityArgs) -> Result<()> {
     }
 }
 
-fn identity_arg_path(args: &IdentityProfileArgs) -> PathBuf {
+fn identity_arg_path(args: &IdentityProfileArgs) -> Result<PathBuf> {
+    validate_alias("identity profile", &args.profile)?;
     let base_dir = config_base_dir(args.config.as_deref());
-    identity_path(&base_dir, args.role.into(), &args.profile)
+    Ok(identity_path(&base_dir, args.role.into(), &args.profile))
 }
 
 fn default_config_path() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("tool-tunnel")
-            .join("config.json");
-    }
-    PathBuf::from("tool-tunnel.json")
+    dirs::home_dir()
+        .map(|home| home.join(".config").join("tool-tunnel").join("config.json"))
+        .unwrap_or_else(|| PathBuf::from("tool-tunnel.json"))
 }

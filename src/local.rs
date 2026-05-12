@@ -15,6 +15,7 @@ use crate::{ClientArgs, config::Config, iroh_link};
 
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Aggregator {
     remotes: Arc<HashMap<String, RemoteSession>>,
@@ -178,10 +179,9 @@ impl ServerHandler for Aggregator {
                 .ok_or_else(|| McpError::invalid_params("unknown remote alias", None))?;
             let mut forwarded = request;
             forwarded.name = Cow::Owned(original_name);
-            remote
-                .peer
-                .call_tool(forwarded)
+            tokio::time::timeout(REMOTE_CALL_TIMEOUT, remote.peer.call_tool(forwarded))
                 .await
+                .map_err(|_| McpError::internal_error("remote tool call timed out", None))?
                 .map_err(|error| McpError::internal_error(error.to_string(), None))
         }
     }

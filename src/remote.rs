@@ -17,6 +17,8 @@ use crate::{ExportArgs, config::Config, iroh_link};
 
 const CHILD_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const CHILD_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const STREAM_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct RemoteProxy {
@@ -113,14 +115,10 @@ async fn connect_child(
         .await
         .context("child MCP initialize timed out")?
         .context("serve child MCP client")?;
-    let tools = tokio::time::timeout(
-        CHILD_INIT_TIMEOUT,
-        client.peer().list_tools(Default::default()),
-    )
-    .await
-    .context("child MCP tools/list timed out")?
-    .context("list child MCP tools")?
-    .tools;
+    let tools = tokio::time::timeout(CHILD_INIT_TIMEOUT, client.peer().list_all_tools())
+        .await
+        .context("child MCP tools/list timed out")?
+        .context("list child MCP tools")?;
     let peer = client.peer().clone();
 
     Ok(ChildSession {
@@ -142,10 +140,14 @@ async fn handle_connection(
         bail!("client endpoint {remote_id} is not allowlisted");
     }
 
-    let (send, mut recv) = connection.accept_bi().await.context("accept iroh stream")?;
-    let mut handshake = vec![0; iroh_link::HANDSHAKE.len()];
-    recv.read_exact(&mut handshake)
+    let (send, mut recv) = tokio::time::timeout(STREAM_ACCEPT_TIMEOUT, connection.accept_bi())
         .await
+        .context("accept iroh stream timed out")?
+        .context("accept iroh stream")?;
+    let mut handshake = vec![0; iroh_link::HANDSHAKE.len()];
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut handshake))
+        .await
+        .context("read tunnel handshake timed out")?
         .context("read tunnel handshake")?;
     if handshake != iroh_link::HANDSHAKE {
         bail!("invalid tunnel handshake");

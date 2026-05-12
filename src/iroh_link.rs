@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use data_encoding::HEXLOWER;
 use iroh::{Endpoint, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -18,10 +18,32 @@ pub const HANDSHAKE: &[u8] = b"tool-tunnel\n";
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn secret_from_file(path: &Path) -> Result<SecretKey> {
+    validate_secret_permissions(path)?;
     let secret = fs::read_to_string(path)
         .with_context(|| format!("read identity key {}", path.display()))?;
     SecretKey::from_str(secret.trim())
         .with_context(|| format!("parse identity key {}", path.display()))
+}
+
+#[cfg(unix)]
+fn validate_secret_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read identity key metadata {}", path.display()))?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        bail!(
+            "identity key {} must not be group/other readable or writable; expected mode 0600",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_secret_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub fn init_identity(path: &Path) -> Result<()> {

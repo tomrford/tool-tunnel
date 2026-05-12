@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use iroh::SecretKey;
+use iroh::{EndpointId, SecretKey};
 use serde::Deserialize;
 use std::str::FromStr;
 
@@ -102,9 +102,10 @@ impl Config {
                 if import.ticket.is_empty() {
                     bail!("client {name:?} import {alias:?} ticket cannot be empty");
                 }
-                if import.endpoint_id.is_empty() {
-                    bail!("client {name:?} import {alias:?} endpointId cannot be empty");
-                }
+                validate_endpoint_id(
+                    &import.endpoint_id,
+                    &format!("client {name:?} import {alias:?} endpointId"),
+                )?;
             }
         }
         for (name, export) in &self.exports {
@@ -115,6 +116,9 @@ impl Config {
             }
             if export.allow_clients.is_empty() {
                 bail!("export {name:?} allowClients cannot be empty");
+            }
+            for client in &export.allow_clients {
+                validate_endpoint_id(client, &format!("export {name:?} allowClients entry"))?;
             }
         }
         self.validate_existing_identity_public_keys()?;
@@ -181,7 +185,7 @@ fn validate_existing_identity_public_key(
     Ok(())
 }
 
-fn validate_alias(kind: &str, alias: &str) -> Result<()> {
+pub fn validate_alias(kind: &str, alias: &str) -> Result<()> {
     if alias.is_empty() {
         bail!("{kind} alias cannot be empty");
     }
@@ -193,6 +197,18 @@ fn validate_alias(kind: &str, alias: &str) -> Result<()> {
     }
     if alias.contains("__") {
         bail!("{kind} alias {alias:?} cannot contain reserved delimiter '__'");
+    }
+    Ok(())
+}
+
+fn validate_endpoint_id(value: &str, kind: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{kind} cannot be empty");
+    }
+    let parsed = EndpointId::from_str(value).with_context(|| format!("{kind} is invalid"))?;
+    let canonical = parsed.to_string();
+    if value != canonical {
+        bail!("{kind} must be canonical endpoint ID {canonical:?}");
     }
     Ok(())
 }
@@ -244,36 +260,40 @@ mod tests {
         Ok(config)
     }
 
+    fn endpoint_id() -> String {
+        SecretKey::generate().public().to_string()
+    }
+
     #[test]
     fn parses_client_imports_and_export_profiles() -> Result<()> {
-        let config = parse_config(
-            r#"
-            {
-              "clients": {
-                "default": {
-                  "imports": {
-                    "mini": {
-                      "ticket": "ticket",
-                      "endpointId": "endpoint"
-                    }
-                  }
-                }
-              },
-              "exports": {
-                "mini-tools": {
-                  "command": "uv",
-                  "args": ["run", "server.py"],
-                  "cwd": "tools",
-                  "env": {
-                    "CACHE_DIR": "/tmp/tool-tunnel"
-                  },
-                  "allowClients": ["client-endpoint"]
+        let endpoint = endpoint_id();
+        let input = r#"
+        {
+          "clients": {
+            "default": {
+              "imports": {
+                "mini": {
+                  "ticket": "ticket",
+                  "endpointId": "$ENDPOINT"
                 }
               }
             }
-            "#,
-        )?;
-
+          },
+          "exports": {
+            "mini-tools": {
+              "command": "uv",
+              "args": ["run", "server.py"],
+              "cwd": "tools",
+              "env": {
+                "CACHE_DIR": "/tmp/tool-tunnel"
+              },
+              "allowClients": ["$ENDPOINT"]
+            }
+          }
+        }
+        "#
+        .replace("$ENDPOINT", &endpoint);
+        let config = parse_config(&input)?;
         assert_eq!(
             config.client("default")?.identity,
             PathBuf::from("/home/me/.config/tool-tunnel/identities/clients/default")
@@ -287,23 +307,24 @@ mod tests {
 
     #[test]
     fn derives_distinct_identities_for_matching_client_and_export_names() -> Result<()> {
-        let config = parse_config(
-            r#"
-            {
-              "clients": {
-                "default": {
-                  "imports": {}
-                }
-              },
-              "exports": {
-                "default": {
-                  "command": "server",
-                  "allowClients": ["client-endpoint"]
-                }
-              }
+        let endpoint = endpoint_id();
+        let input = r#"
+        {
+          "clients": {
+            "default": {
+              "imports": {}
             }
-            "#,
-        )?;
+          },
+          "exports": {
+            "default": {
+              "command": "server",
+              "allowClients": ["$ENDPOINT"]
+            }
+          }
+        }
+        "#
+        .replace("$ENDPOINT", &endpoint);
+        let config = parse_config(&input)?;
 
         assert_eq!(
             config.client("default")?.identity,
@@ -358,5 +379,32 @@ mod tests {
         };
 
         assert!(message.contains("allowClients cannot be empty"));
+    }
+
+    #[test]
+    fn rejects_invalid_endpoint_id() {
+        let result = parse_config(
+            r#"
+            {
+              "clients": {
+                "default": {
+                  "imports": {
+                    "mini": {
+                      "ticket": "ticket",
+                      "endpointId": "not-an-endpoint"
+                    }
+                  }
+                }
+              },
+              "exports": {}
+            }
+            "#,
+        );
+        let message = match result {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(message.contains("endpointId is invalid"));
     }
 }
